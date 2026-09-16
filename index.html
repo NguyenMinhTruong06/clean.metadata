@@ -737,7 +737,182 @@
       lucide.createIcons();
     }
 
+    // ============================================================
+    // XOÁ METADATA LOSSLESS (giữ nguyên 100% dữ liệu ảnh)
+    // Bóc segment metadata ngay trên bytes của file, không nén lại.
+    // ============================================================
+    function concatBytes(parts) {
+      let total = 0;
+      for (const p of parts) total += p.length;
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const p of parts) { out.set(p, off); off += p.length; }
+      return out;
+    }
+
+    function readAscii(bytes, start, len) {
+      let s = '';
+      for (let k = 0; k < len && start + k < bytes.length; k++) {
+        const c = bytes[start + k];
+        s += (c >= 32 && c < 127) ? String.fromCharCode(c) : '.';
+      }
+      return s;
+    }
+
+    // JPEG: giữ nguyên DQT/DHT/SOF/entropy, chỉ bỏ APP1(Exif/XMP), APP2(trừ ICC), APP12, APP13, COM
+    function stripJpegMetadata(bytes) {
+      if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return null; // không phải JPEG thuần
+      const parts = [bytes.subarray(0, 2)];
+      let i = 2;
+      let dropped = 0;
+      while (i < bytes.length) {
+        while (i < bytes.length && bytes[i] === 0xFF) i++;
+        if (i >= bytes.length) break;
+        const marker = bytes[i++];
+
+        if (marker === 0xDA) { // SOS: giữ nguyên phần còn lại (toàn bộ dữ liệu nén)
+          parts.push(bytes.subarray(i - 2, bytes.length));
+          break;
+        }
+        if (marker === 0xD9) { // EOI
+          parts.push(bytes.subarray(i - 2, i));
+          break;
+        }
+        if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) continue; // marker không có segment
+        if (i + 2 > bytes.length) return null;
+        const segLen = (bytes[i] << 8) | bytes[i + 1];
+        if (segLen < 2) return null;
+        const segEnd = i + segLen;
+        if (segEnd > bytes.length) return null;
+
+        const hdr = readAscii(bytes, i + 2, Math.min(segLen - 2, 32));
+        let drop = false;
+        if (marker === 0xE1) { // APP1: EXIF / XMP
+          drop = hdr.startsWith('Exif') || hdr.indexOf('xap/1.0') >= 0 || hdr.indexOf('xmp') >= 0;
+        } else if (marker === 0xE2) { // APP2: giữ ICC_PROFILE (màu sắc), bỏ XMP/MPF khác
+          drop = hdr.indexOf('ICC_PROFILE') < 0;
+        } else if (marker === 0xED || marker === 0xEC) { // APP13 Photoshop/IPTC, APP12 Ducky
+          drop = true;
+        } else if (marker === 0xFE) { // COM comment
+          drop = true;
+        }
+
+        if (drop) {
+          dropped++;
+        } else {
+          parts.push(bytes.subarray(i - 2, segEnd));
+        }
+        i = segEnd;
+      }
+      if (dropped === 0) return null; // không có metadata → fallback không cần thiết, trả null để xử lý canvas
+      return concatBytes(parts);
+    }
+
+    // PNG: giữ IHDR/PLTE/tRNS/gAMA/cHRM/sRGB/iCCP/pHYs/bKGD/IDAT, bỏ tEXt/zTXt/iTXt/eXIf/tIME
+    function stripPngMetadata(bytes) {
+      const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+      for (let k = 0; k < 8; k++) if (bytes[k] !== sig[k]) return null;
+      const bad = new Set(['tEXt', 'zTXt', 'iTXt', 'eXIf', 'tIME']);
+      const parts = [bytes.subarray(0, 8)];
+      let i = 8;
+      let dropped = 0;
+      while (i + 8 <= bytes.length) {
+        const len = ((bytes[i] << 24) | (bytes[i+1] << 16) | (bytes[i+2] << 8) | bytes[i+3]) >>> 0;
+        const type = String.fromCharCode(bytes[i+4], bytes[i+5], bytes[i+6], bytes[i+7]);
+        const end = i + 8 + len + 4; // + CRC
+        if (end > bytes.length) return null;
+        if (bad.has(type)) {
+          dropped++;
+        } else {
+          parts.push(bytes.subarray(i, end));
+        }
+        i = end;
+        if (type === 'IEND') break;
+      }
+      if (dropped === 0) return null;
+      return concatBytes(parts);
+    }
+
+    // WebP: bỏ chunk EXIF / XMP, giữ VP8/VP8L/VP8X/ANIM/ALPH...
+    function stripWebpMetadata(bytes) {
+      if (bytes.length < 12) return null;
+      if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) return null; // RIFF
+      if (bytes[8] !== 0x57 || bytes[9] !== 0x45 || bytes[10] !== 0x42 || bytes[11] !== 0x50) return null; // WEBP
+      const parts = [bytes.subarray(0, 12)];
+      let i = 12;
+      let modified = false;
+      while (i + 8 <= bytes.length) {
+        const type = String.fromCharCode(bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]);
+        const size = (bytes[i+4] | (bytes[i+5] << 8) | (bytes[i+6] << 16) | (bytes[i+7] << 24)) >>> 0;
+        const pad = size % 2;
+        const end = i + 8 + size + pad;
+        if (end > bytes.length) return null;
+        if (type === 'EXIF' || type === 'XMP ') {
+          modified = true;
+        } else {
+          parts.push(bytes.subarray(i, end));
+        }
+        i = end;
+      }
+      if (!modified) return null;
+      const out = concatBytes(parts);
+      const newSize = out.length - 8;
+      out[4] = newSize & 0xFF;
+      out[5] = (newSize >> 8) & 0xFF;
+      out[6] = (newSize >> 16) & 0xFF;
+      out[7] = (newSize >> 24) & 0xFF;
+      return out;
+    }
+
     async function stripMetadata(file, formatChoice, qualityVal, fixOrientation = true) {
+      // 1) Chế độ "Giữ nguyên bản": bóc segment trên binary → lossless, giữ nguyên chất lượng & dung lượng pixel
+      if (formatChoice === 'original') {
+        try {
+          // Chỉ phải re-encode khi cần "Bảo tồn góc xoay" (EXIF Orientation)
+          let needFix = false;
+          if (fixOrientation) {
+            try {
+              const meta = await exifr.parse(file, ['Orientation']);
+              needFix = !!(meta && meta.Orientation && meta.Orientation > 1);
+            } catch (e) { /* ignore */ }
+          }
+          if (!needFix) {
+            const buf = await file.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            const n = file.name.toLowerCase();
+            const isJpeg = file.type === 'image/jpeg' || /\.jpe?g$/.test(n);
+            const isPng = file.type === 'image/png' || n.endsWith('.png');
+            const isWebp = file.type === 'image/webp' || n.endsWith('.webp');
+            let out = null;
+            if (isJpeg) out = stripJpegMetadata(bytes);
+            else if (isPng) out = stripPngMetadata(bytes);
+            else if (isWebp) out = stripWebpMetadata(bytes);
+            if (out && out.length > 0 && out.length < bytes.length) {
+              return {
+                blob: new Blob([out], { type: file.type || 'image/jpeg' }),
+                mime: file.type || 'image/jpeg',
+                width: 0, height: 0,
+                lossless: true
+              };
+            }
+            // Không tìm thấy metadata → trả về chính file gốc, KHÔNG re-encode
+            // (bảo toàn chất lượng & dung lượng tuyệt đối)
+            return {
+              blob: new Blob([bytes], { type: file.type || 'image/jpeg' }),
+              mime: file.type || 'image/jpeg',
+              width: 0, height: 0,
+              lossless: true
+            };
+          }
+        } catch (e) {
+          console.warn('Lossless strip failed, fallback to canvas', e);
+        }
+      }
+      // 2) Fallback: đổi định dạng hoặc fix orientation → canvas re-encode
+      return stripViaCanvas(file, formatChoice, qualityVal, fixOrientation);
+    }
+
+    function stripViaCanvas(file, formatChoice, qualityVal, fixOrientation) {
       return new Promise((resolve, reject) => {
         const img = new Image();
         const url = URL.createObjectURL(file);
@@ -774,7 +949,8 @@
                   blob: blob,
                   mime: targetMime,
                   width: canvas.width,
-                  height: canvas.height
+                  height: canvas.height,
+                  lossless: false
                 });
               } else {
                 reject(new Error('Không thể tạo blob từ canvas'));
