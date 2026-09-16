@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ExifClean - Công Cụ Xóa Metadata & Bảo Vệ Riêng Tư Ảnh</title>
+  <title>CleanMetaData - Công Cụ Xóa Metadata & Bảo Vệ Riêng Tư Ảnh</title>
+  <link rel="icon" type="image/x-icon" href="logo.ico">
   <!-- Dependencies served locally for speed & reliability (GitHub Pages) -->
   <script src="vendor/tailwind.min.js"></script>
   <script src="vendor/lucide.min.js"></script>
@@ -81,17 +82,11 @@
         </div>
         <div>
           <div class="flex items-center gap-2">
-            <h1 class="text-base font-bold tracking-tight text-white">ExifClean</h1>
+            <h1 class="text-base font-bold tracking-tight text-white">CleanMetaData</h1>
             <span class="text-[10px] uppercase font-semibold tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Client-Side 100%</span>
           </div>
           <p class="text-xs text-slate-400">Xoá Metadata & Triệt Tiêu Dữ Liệu Riêng Tư Ảnh</p>
         </div>
-      </div>
-
-      <!-- Security Guarantee Pill -->
-      <div class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800/60 border border-slate-700/50 text-xs text-slate-300">
-        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-        <span>Dữ liệu xử lý cục bộ tại máy của bạn • Không gửi lên Internet</span>
       </div>
 
       <!-- Quick Action Buttons -->
@@ -382,10 +377,9 @@
 
   <footer class="border-t border-slate-800/80 bg-surface-950 py-4 mt-12 text-center text-xs text-slate-500">
     <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-      <div>ExifClean • Công cụ bảo vệ quyền riêng tư hình ảnh trực tuyến</div>
+      <div>CleanMetaData • Công cụ bảo vệ quyền riêng tư hình ảnh trực tuyến</div>
       <div class="flex items-center gap-4 text-slate-400">
-        <span class="flex items-center gap-1"><i data-lucide="cpu" class="w-3.5 h-3.5 text-indigo-400"></i> Pure Browser Engine</span>
-        <span>HTML5 Canvas & Pure Stream Stripping</span>
+        <span>Truongnm</span>
       </div>
     </div>
   </footer>
@@ -911,7 +905,7 @@
 
       showToast('Đang đóng gói file ZIP...', 'archive');
       const zip = new JSZip();
-      const folder = zip.folder("exifclean_images");
+      const folder = zip.folder("cleanmetadata_images");
 
       cleanedItems.forEach(item => {
         const nameParts = item.name.split('.');
@@ -922,7 +916,7 @@
       });
 
       const zipBlob = await zip.generateAsync({ type: "blob" });
-      saveAs(zipBlob, `ExifClean_Batch_${Date.now()}.zip`);
+      saveAs(zipBlob, `CleanMetaData_Batch_${Date.now()}.zip`);
       showToast('Đã tạo và tải file ZIP thành công!', 'check-circle');
     }
 
