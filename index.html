@@ -140,6 +140,19 @@
       </div>
     </div>
 
+    <div id="upload-progress-container" class="hidden bg-surface-900 border border-slate-800 rounded-xl p-3">
+      <div class="flex items-center justify-between text-xs mb-1.5">
+        <span id="upload-progress-status" class="text-slate-400 flex items-center gap-2">
+          <i data-lucide="loader" class="w-3.5 h-3.5 animate-spin text-indigo-400"></i>
+          <span>Đang thêm ảnh vào hàng chờ...</span>
+        </span>
+        <span id="upload-progress-count" class="font-mono text-indigo-400 font-bold">0/0</span>
+      </div>
+      <div class="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+        <div id="upload-progress-bar" class="h-full bg-indigo-500 transition-all duration-200" style="width: 0%"></div>
+      </div>
+    </div>
+
     <section id="processing-controls" class="hidden flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 p-4 rounded-xl bg-surface-900/70 border border-slate-800">
       <!-- Options Left -->
       <div class="flex flex-wrap items-center gap-4 text-xs">
@@ -504,97 +517,118 @@
       return null;
     }
 
-    async function handleIncomingFiles(fileList) {
-      const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'image/x-canon-cr2'];
-      const newItems = [];
+    // --- TẢI LÊN NHIỀU ẢNH: mỗi ảnh được thêm vào hàng chờ NGAY khi xong (không chờ cả lô),
+    //     chạy tối đa 2 ảnh song song (máy RAM yếu không bị quá tải), có thanh tiến độ rõ ràng.
+    //     LỖI CŨ: vòng lặp chờ từng ảnh tuần tự, mỗi ảnh phải decode full-res làm thumb
+    //     + parse XMP/IPTC nặng → 10 ảnh = tab treo lặng lẽ, trông như "không được".
+    let uploadBusy = false; // chống gọi trùng khi kéo thả liên tục
 
-      for (let i = 0; i < fileList.length; i++) {
-        const file = fileList[i];
-        if (!file.type.startsWith('image/') && !file.name.match(/\.(jpe?g|png|webp|tiff?|cr2)$/i)) {
-          showToast(`Bỏ qua '${file.name}' (Định dạng không được hỗ trợ)`, 'alert-circle');
-          continue;
-        }
+    async function processOneFile(file) {
+      const id = 'img_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      const originalUrl = URL.createObjectURL(file);
+      let thumbUrl = null;
+      let rawMeta = null, hasGps = false, gpsData = null, metaCount = 0;
 
-        const id = 'img_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-        const originalUrl = URL.createObjectURL(file);
-        // Thumbnail nhỏ cho MỌI ảnh (không decode full-resolution)
-        const thumbUrl = await makeThumbUrl(file);
-
-        // Read metadata using exifr
-        let rawMeta = null;
-        let hasGps = false;
-        let gpsData = null;
-        let metaCount = 0;
-
-        try {
-          // Parse all relevant tags: tiff, exif, gps, iptc, xmp
-          rawMeta = await exifr.parse(file, {
-            tiff: true,
-            xmp: true,
-            iptc: true,
-            jfif: true,
-            gps: true,
-            mergeOutput: true,
-            // Tối ưu RAM: không load thumbnail ảnh vào RAM (exifr mặc định đã đọc lazy theo chunk)
-            thumbnails: false,
-            interop: false,
-          });
-
-          if (rawMeta) {
-            metaCount = Object.keys(rawMeta).length;
-            if (rawMeta.latitude && rawMeta.longitude) {
-              hasGps = true;
-              gpsData = {
-                lat: rawMeta.latitude,
-                lng: rawMeta.longitude
-              };
-            }
+      try {
+        rawMeta = await exifr.parse(file, {
+          // CHỈ đọc các block cần thiết (tiff+gps) — bỏ xmp/iptc nặng; máy yếu chạy nhanh hơn nhiều
+          tiff: true,
+          gps: true,
+          mergeOutput: true,
+          thumbnails: false,
+          interop: false,
+        });
+        if (rawMeta) {
+          metaCount = Object.keys(rawMeta).length;
+          if (rawMeta.latitude && rawMeta.longitude) {
+            hasGps = true;
+            gpsData = { lat: rawMeta.latitude, lng: rawMeta.longitude };
           }
-        } catch (err) {
-          console.warn('Không thể đọc metadata file:', file.name, err);
         }
-
-        const item = {
-          id: id,
-          file: file,
-          name: file.name,
-          originalSize: file.size,
-          cleanedSize: null,
-          originalUrl: originalUrl,
-          thumbUrl: thumbUrl, // thumbnail 112px — hiển thị được cho mọi ảnh, RAM cực thấp
-          cleanedBlob: null,
-          cleanedUrl: null,
-          status: 'pending', // 'pending', 'cleaned', 'error'
-          rawMeta: rawMeta || {},
-          hasGps: hasGps,
-          gpsData: gpsData,
-          metaCount: metaCount
-        };
-
-        newItems.push(item);
+      } catch (err) {
+        console.warn('Không thể đọc metadata:', file.name, err);
       }
 
-      if (newItems.length === 0) return;
+      // Tạo thumb sau khi parse (không đè lên nhau)
+      thumbUrl = await makeThumbUrl(file);
 
-      fileQueue.push(...newItems);
-      updateUIQueue();
+      return {
+        id, file, name: file.name,
+        originalSize: file.size,
+        cleanedSize: null,
+        originalUrl, thumbUrl,
+        cleanedBlob: null, cleanedUrl: null,
+        status: 'pending', // 'pending', 'cleaned', 'error'
+        rawMeta: rawMeta || {}, hasGps, gpsData, metaCount
+      };
+    }
 
-      // Cảnh báo RAM: ước lượng bộ nhớ phải dùng (ảnh gốc + thumbnail decode + blob sạch)
-      // Quy tắc ngón cái: ảnh ~10-15MB RAM thực tế mỗi ảnh (decode bitmap)
-      estimatedRamMB += newItems.reduce((sum, it) => sum + (it.originalSize || 0), 0) / (1024 * 1024) * 3;
+    async function handleIncomingFiles(fileList) {
+      // Lọc file hợp lệ trước
+      const files = [];
+      for (let i = 0; i < fileList.length; i++) {
+        const f = fileList[i];
+        if (!f.type.startsWith('image/') && !f.name.match(/\.(jpe?g|png|webp|tiff?|cr2)$/i)) {
+          showToast(`Bỏ qua '${f.name}' (Định dạng không được hỗ trợ)`, 'alert-circle');
+        } else {
+          files.push(f);
+        }
+      }
+      if (files.length === 0) return;
+
+      // Hiện thanh tiến độ tải lên
+      const upBox = document.getElementById('upload-progress-container');
+      const upBar = document.getElementById('upload-progress-bar');
+      const upCount = document.getElementById('upload-progress-count');
+      const upStatus = document.getElementById('upload-progress-status');
+      upBox.classList.remove('hidden');
+      let done = 0;
+      const total = files.length;
+      const updateProgress = () => {
+        upBar.style.width = `${Math.round((done / total) * 100)}%`;
+        upCount.textContent = `${done}/${total}`;
+      };
+      upBar.style.width = '0%';
+      upCount.textContent = `0/${total}`;
+      upStatus.innerHTML = `<i data-lucide="loader" class="w-3.5 h-3.5 animate-spin text-indigo-400"></i><span>Đang thêm ${done}/${total} ảnh vào hàng chờ...</span>`;
+      lucide.createIcons();
+
+      // Xử lý với độ song song = 2 (máy yếu không treo, nhưng nhanh hơn hẳn tuần tự)
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < total) {
+          const idx = cursor++;
+          const file = files[idx];
+          try {
+            const item = await processOneFile(file);
+            fileQueue.push(item);
+            updateUIQueue();
+            // Tự chọn ảnh đầu tiên nếu chưa có gì chọn
+            if (!selectedId) selectItem(item.id);
+          } catch (e) {
+            console.error('Lỗi xử lý file:', file.name, e);
+            showToast(`Lỗi khi thêm '${file.name}'`, 'alert-circle');
+          }
+          done++;
+          updateProgress();
+        }
+      };
+
+      await Promise.all([worker(), worker()]);
+
+      // Hoàn tất: ẩn thanh tiến độ, thông báo
+      setTimeout(() => {
+        upBox.classList.add('hidden');
+        upStatus.innerHTML = `<i data-lucide="loader" class="w-3.5 h-3.5 animate-spin text-indigo-400"></i><span>Đang thêm ảnh vào hàng chờ...</span>`;
+      }, 600);
+      showToast(`Đã thêm ${done} ảnh vào hàng chờ.`, 'check-circle');
+
+      // Cảnh báo RAM nếu hàng đợi quá lớn
+      estimatedRamMB += files.reduce((sum, f) => sum + (f.size || 0), 0) / (1024 * 1024) * 3;
       const estMB = Math.round(estimatedRamMB);
       if (fileQueue.length >= 15 && estMB > 800) {
-        showToast(`⚠️ Số ảnh lớn: ước tính ~${estMB}MB RAM. Nên chia nhỏ hoặc dùng "Lưu vào thư mục" sau khi làm sạch.`, 'alert-triangle');
-      } else if (fileQueue.length >= 30) {
-        showToast('Hàng đợi nhiều ảnh — nếu máy chậm, hãy xử lý theo nhóm nhỏ hơn.', 'alert-triangle');
+        showToast(`⚠️ Số ảnh lớn: ước tính ~${estMB}MB RAM. Nên xử lý theo nhóm nhỏ hơn.`, 'alert-triangle');
       }
-
-      // Automatically select first item if none selected
-      if (!selectedId && fileQueue.length > 0) {
-        selectItem(fileQueue[0].id);
-      }
-
-      showToast(`Đã thêm thành công ${newItems.length} ảnh vào hàng đợi.`, 'check-circle');
     }
 
     function updateUIQueue() {
