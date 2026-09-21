@@ -480,6 +480,30 @@
       return `${base}${suffix}.${ext}`;
     }
 
+    // Tạo THUMBNAIL NHỎ cho MỌI ảnh (112px) — người dùng nhìn thấy đủ ảnh trong
+    // hàng chờ, nhưng RAM gần như không tăng (48KB thay vì 48MB cho ảnh 12MP).
+    // Đây là cách máy RAM yếu vẫn hiển thị nhiều ảnh mà không bị treo.
+    async function makeThumbUrl(file) {
+      // Bỏ qua ảnh quá lớn (>20MB) — decode full-res sẽ làm treo máy RAM yếu
+      if (file.size > 20 * 1024 * 1024) return null;
+      try {
+        if (typeof createImageBitmap === 'function') {
+          const bmp = await createImageBitmap(file, {
+            resizeWidth: 112,
+            resizeQuality: 'low'
+          });
+          const c = document.createElement('canvas');
+          c.width = Math.min(bmp.width, 112);
+          c.height = Math.min(bmp.height, 112);
+          c.getContext('2d').drawImage(bmp, 0, 0);
+          bmp.close(); // giải phóng bitmap ngay
+          const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.7));
+          if (blob && blob.size > 0) return URL.createObjectURL(blob);
+        }
+      } catch (e) { /* fallback: dùng ảnh gốc lazy */ }
+      return null;
+    }
+
     async function handleIncomingFiles(fileList) {
       const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'image/x-canon-cr2'];
       const newItems = [];
@@ -493,6 +517,8 @@
 
         const id = 'img_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         const originalUrl = URL.createObjectURL(file);
+        // Thumbnail nhỏ cho MỌI ảnh (không decode full-resolution)
+        const thumbUrl = await makeThumbUrl(file);
 
         // Read metadata using exifr
         let rawMeta = null;
@@ -535,6 +561,7 @@
           originalSize: file.size,
           cleanedSize: null,
           originalUrl: originalUrl,
+          thumbUrl: thumbUrl, // thumbnail 112px — hiển thị được cho mọi ảnh, RAM cực thấp
           cleanedBlob: null,
           cleanedUrl: null,
           status: 'pending', // 'pending', 'cleaned', 'error'
@@ -615,12 +642,14 @@
         }`;
         card.onclick = () => selectItem(item.id);
 
-        // THUMBNAIL HIỂU QUẢ: không decode full-resolution từng ảnh cho UI.
-        // Với ảnh 12MP decode tốn ~48MB RAM/ảnh → máy yếu treo ngay khi kéo 20+ ảnh.
-        // Chỉ hiển thị ảnh thật cho ảnh ĐANG CHỌN; các card khác hiện placeholder nhẹ.
+        // THUMBNAIL MỌI ẢNH: dùng ảnh thu nhỏ 112px (tạo lúc upload, RAM cực thấp)
+        // — người dùng nhìn thấy đầy đủ toàn bộ ảnh trong hàng chờ.
+        // Ảnh đang chọn hiện ảnh sạch (nếu có) hoặc ảnh lớn hơn để rõ.
         let thumbHtml = '';
         if (isSelected) {
-          thumbHtml = `<img src="${item.cleanedUrl || item.originalUrl}" class="w-full h-full object-cover" alt="thumbnail">`;
+          thumbHtml = `<img src="${item.cleanedUrl || item.thumbUrl || item.originalUrl}" loading="lazy" decoding="async" class="w-full h-full object-cover" alt="thumbnail">`;
+        } else if (item.thumbUrl) {
+          thumbHtml = `<img src="${item.thumbUrl}" loading="lazy" decoding="async" class="w-full h-full object-cover" alt="thumbnail">`;
         } else {
           thumbHtml = `<span class="text-[10px] text-slate-500">${item.status === 'cleaned' ? '✓' : '#'}</span>`;
         }
@@ -1341,6 +1370,7 @@
         // Cập nhật lại ước lượng RAM
         estimatedRamMB = Math.max(0, estimatedRamMB - (removed.originalSize || 0) / (1024 * 1024) * 3);
         if (removed.originalUrl) URL.revokeObjectURL(removed.originalUrl);
+        if (removed.thumbUrl) URL.revokeObjectURL(removed.thumbUrl);
         if (removed.cleanedUrl) URL.revokeObjectURL(removed.cleanedUrl);
 
         if (selectedId === id) {
@@ -1356,6 +1386,7 @@
     function resetApp() {
       fileQueue.forEach(item => {
         if (item.originalUrl) URL.revokeObjectURL(item.originalUrl);
+        if (item.thumbUrl) URL.revokeObjectURL(item.thumbUrl);
         if (item.cleanedUrl) URL.revokeObjectURL(item.cleanedUrl);
       });
       fileQueue = [];
