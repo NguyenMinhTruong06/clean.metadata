@@ -459,6 +459,27 @@
       return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
     }
 
+    // Tên file xuất: ĐUÔI theo ĐỊNH DẠNG đã chọn khi xoá (blob.type thực tế),
+    // KHÔNG theo file gốc. Chọn "WebP" → ra .webp dù file gốc là .jpg.
+    function getCleanFileName(item, suffix = '_clean') {
+      const base = (item.name || 'image').replace(/\.[^.]*$/, '') || 'image';
+      const mimeExt = {
+        'image/jpeg': 'jpg',
+        'image/webp': 'webp',
+        'image/png': 'png',
+        'image/gif': 'gif',
+        'image/tiff': 'tiff',
+        'image/bmp': 'bmp'
+      };
+      let ext = (item.cleanedBlob && mimeExt[item.cleanedBlob.type]) || '';
+      if (!ext) {
+        // Không xác định được MIME → giữ đuôi gốc
+        const m = (item.name || '').match(/\.([^.]+)$/);
+        ext = m ? m[1].toLowerCase() : 'jpg';
+      }
+      return `${base}${suffix}.${ext}`;
+    }
+
     async function handleIncomingFiles(fileList) {
       const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'image/x-canon-cr2'];
       const newItems = [];
@@ -586,6 +607,7 @@
       fileQueue.forEach((item, index) => {
         const isSelected = item.id === selectedId;
         const card = document.createElement('div');
+        card.dataset.id = item.id;
         card.className = `p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
           isSelected 
             ? 'bg-indigo-950/30 border-indigo-500/60 shadow-md shadow-indigo-950/40' 
@@ -664,6 +686,65 @@
         container.appendChild(card);
       });
 
+      lucide.createIcons();
+    }
+
+    // Cập nhật trạng thái TỪNG card theo đúng thứ tự xử lý (trên → dưới)
+    // mà không cần render lại toàn bộ danh sách (máy yếu chạy mượt hơn).
+    function updateCardStatus(item, processing) {
+      const container = document.getElementById('image-cards-container');
+      const card = container && container.querySelector(`[data-id="${item.id}"]`);
+      if (!card) return;
+
+      // Vùng badges trong card (tìm theo class đặc trưng)
+      const badgeWrap = card.querySelector('.flex.flex-wrap');
+      if (!badgeWrap) return;
+
+      const sizeSpan = card.querySelector('.text-emerald-400.font-mono');
+
+      if (processing) {
+        // Thêm badge "Đang xử lý..." màu xanh dương nhấp nháy
+        badgeWrap.innerHTML = `
+          <span class="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-300 bg-indigo-500/15 border border-indigo-400/30 px-2 py-0.5 rounded-full">
+            <i data-lucide="loader" class="w-3 h-3 animate-spin"></i> Đang xử lý...
+          </span>
+          ${item.hasGps ? `<span class="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-1.5 py-0.5 rounded">📍 GPS</span>` : ''}
+        `;
+      } else if (item.status === 'error') {
+        // Badge lỗi
+        badgeWrap.innerHTML = `
+          <span class="inline-flex items-center gap-1 text-[11px] font-medium text-rose-300 bg-rose-500/10 border border-rose-500/25 px-2 py-0.5 rounded-full">
+            <i data-lucide="x-circle" class="w-3 h-3"></i> Lỗi xử lý
+          </span>
+          ${item.hasGps ? `<span class="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-1.5 py-0.5 rounded">📍 GPS</span>` : ''}
+        `;
+      } else {
+        // Thay bằng badge "Đã làm sạch" + kích thước mới
+        badgeWrap.innerHTML = `
+          <span class="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+            <i data-lucide="check" class="w-3 h-3"></i> Đã làm sạch
+          </span>
+          ${item.hasGps ? `<span class="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-1.5 py-0.5 rounded">📍 GPS</span>` : ''}
+        `;
+        if (sizeSpan && item.cleanedSize) {
+          sizeSpan.textContent = `→ ${formatBytes(item.cleanedSize)}`;
+        }
+        // Đổi nút hành động: ẩn nút "play", hiện nút tải/so sánh
+        const actions = card.querySelector('.gap-1.shrink-0');
+        if (actions) {
+          actions.innerHTML = `
+            <button onclick="openCompareModal('${item.id}')" title="So sánh trước/sau" class="p-1.5 text-slate-400 hover:text-indigo-400 rounded-lg hover:bg-slate-800">
+              <i data-lucide="columns" class="w-4 h-4"></i>
+            </button>
+            <button onclick="downloadSingle('${item.id}')" title="Tải ảnh sạch" class="p-1.5 text-slate-400 hover:text-emerald-400 rounded-lg hover:bg-slate-800">
+              <i data-lucide="download" class="w-4 h-4"></i>
+            </button>
+            <button onclick="removeItem('${item.id}')" title="Xóa khỏi danh sách" class="p-1.5 text-slate-400 hover:text-red-400 rounded-lg hover:bg-slate-800">
+              <i data-lucide="trash" class="w-4 h-4"></i>
+            </button>
+          `;
+        }
+      }
       lucide.createIcons();
     }
 
@@ -1113,8 +1194,12 @@
       const total = pendingItems.length;
 
       for (const item of pendingItems) {
+        // Đánh dấu ảnh ĐANG xử lý (theo thứ tự trên → dưới)
+        updateCardStatus(item, true);
         try {
           const result = await stripMetadata(item.file, formatChoice, qualityVal, fixOrientation);
+          // Thu hồi blob/URL cũ trước khi thay bằng bản mới (tránh rò rỉ RAM)
+          if (item.cleanedUrl) URL.revokeObjectURL(item.cleanedUrl);
           item.cleanedBlob = result.blob;
           item.cleanedSize = result.blob.size;
           item.cleanedUrl = URL.createObjectURL(result.blob);
@@ -1127,9 +1212,12 @@
         } catch (e) {
           console.error(e);
           item.status = 'error';
+          updateCardStatus(item, false);
         }
 
         completed++;
+        // Tick xanh NGAY khi ảnh này xong (thứ tự trên → dưới, không đợi hết batch)
+        if (item.status === 'cleaned') updateCardStatus(item, false);
         const pct = Math.round((completed / total) * 100);
         progressBar.style.width = `${pct}%`;
         progressPercent.textContent = `${pct}%`;
@@ -1158,11 +1246,8 @@
       const item = fileQueue.find(f => f.id === id);
       if (!item || !item.cleanedBlob) return;
 
-      // generate clean filename with prefix/suffix
-      const nameParts = item.name.split('.');
-      const ext = nameParts.length > 1 ? nameParts.pop() : '';
-      const baseName = nameParts.join('.');
-      const cleanFileName = `${baseName}_cleaned.${ext || 'jpg'}`;
+      // generate clean filename — đuôi theo định dạng đã chọn khi xoá
+      const cleanFileName = getCleanFileName(item, '_cleaned');
 
       saveAs(item.cleanedBlob, cleanFileName);
       showToast(`Đang tải file '${cleanFileName}'...`, 'download');
@@ -1186,10 +1271,7 @@
       const folder = zip.folder("cleanmetadata_images");
 
       cleanedItems.forEach(item => {
-        const nameParts = item.name.split('.');
-        const ext = nameParts.length > 1 ? nameParts.pop() : '';
-        const base = nameParts.join('.');
-        const finalName = `${base}_clean.${ext || 'jpg'}`;
+        const finalName = getCleanFileName(item, '_clean');
         folder.file(finalName, item.cleanedBlob);
       });
 
@@ -1223,10 +1305,7 @@
         let saved = 0;
         for (const item of cleanedItems) {
           try {
-            const nameParts = item.name.split('.');
-            const ext = nameParts.length > 1 ? nameParts.pop() : '';
-            const base = nameParts.join('.');
-            const finalName = `${base}_clean.${ext || 'jpg'}`;
+            const finalName = getCleanFileName(item, '_clean');
             const fh = await dirHandle.getFileHandle(finalName, { create: true });
             const writable = await fh.createWritable();
             await writable.write(item.cleanedBlob);
